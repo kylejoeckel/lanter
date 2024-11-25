@@ -1,0 +1,31 @@
+service: video-search-service
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  timeout: 10
+
+functions:
+  searchFilms:
+    handler: src/handler.searchFilms
+    events:
+      - http:
+          method: post
+          path: search-films
+
+plugins:
+  - serverless-esbuild
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude:
+      - aws-sdk
+    target: "node18"
+    platform: "node"
+    concurrency: 10
