@@ -89,12 +89,3 @@ The project includes comprehensive unit tests using Jest to verify functionality
 - **Error Handling**: Tests that the service handles downstream service failures gracefully without failing the entire request.
 - **Exclusion Flags**: Checks that services are correctly excluded based on the provided exclusion flags.
 
-### Sample Test Case Explanation
-
-- **Test Name**: `should correctly provide the nextPageKey for pagination`
-- **Purpose**: Verifies that pagination works across multiple services and that the `nextPageKey` correctly encodes the cursors for services that have more data.
-- **Process**:
-  - Mock data is set up for VHS and DVD services.
-  - The first request retrieves a page of films and receives a `nextPageKey`.
-  - The second request uses the `nextPageKey` to fetch the next set of films.
-  - Assertions confirm that the number of films returned and the `nextPageKey` values are as expected.
