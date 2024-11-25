@@ -41,40 +41,48 @@ export const searchFilms: APIGatewayProxyHandler = async (
 
     const requestBody: FilmSearchRequest = JSON.parse(event.body);
 
-    const services: Record<ServiceKey, string> = {
-      vhs: "https://vhs.service.com/search",
-      dvd: "https://dvd.service.com/search",
-      projector: "https://projector.service.com/search",
-    };
-
-    const activeServices = Object.entries(services).filter(([key]) => {
-      if (key === "vhs" && requestBody.excludeVHS) return false;
-      if (key === "dvd" && requestBody.excludeDVD) return false;
-      if (key === "projector" && requestBody.excludeProjector) return false;
-      return true;
-    }) as [ServiceKey, string][];
+    const services = Object.fromEntries(
+      Object.entries({
+        vhs: "https://vhs.service.com/search",
+        dvd: "https://dvd.service.com/search",
+        projector: "https://projector.service.com/search",
+      }).filter(([key]) => {
+        if (key === "vhs" && requestBody.excludeVHS) return false;
+        if (key === "dvd" && requestBody.excludeDVD) return false;
+        if (key === "projector" && requestBody.excludeProjector) return false;
+        return true;
+      })
+    ) as Record<ServiceKey, string>;
 
     const sortField = requestBody.sortField;
     const sortDirection = requestBody.sortDirection;
 
-    const cursors: Record<ServiceKey, number> = requestBody.nextPageKey
+    const currentPages: Record<ServiceKey, number> = requestBody.nextPageKey
       ? decodeNextPageKey(requestBody.nextPageKey)
-      : { vhs: 0, dvd: 0, projector: 0 };
+      : { vhs: 1, dvd: 1, projector: 1 };
 
     const serviceStates: Record<
       ServiceKey,
       {
-        cursor: number | null;
+        currentPage: number;
         buffer: Film[];
+        noMoreData: boolean;
       }
-    > = {} as any;
-
-    const activeServiceKeys: ServiceKey[] = activeServices.map(([key]) => key);
-
-    for (const key of activeServiceKeys) {
-      serviceStates[key] = {
-        cursor: cursors[key] ?? 0,
+    > = {
+      vhs: { currentPage: currentPages.vhs, buffer: [], noMoreData: false },
+      dvd: { currentPage: currentPages.dvd, buffer: [], noMoreData: false },
+      projector: {
+        currentPage: currentPages.projector,
         buffer: [],
+        noMoreData: false,
+      },
+    };
+
+    for (const key in services) {
+      serviceStates[key as ServiceKey] = {
+        currentPage: currentPages[key as ServiceKey] ?? 1,
+        buffer: [],
+        noMoreData: false,
       };
     }
 
@@ -82,40 +90,37 @@ export const searchFilms: APIGatewayProxyHandler = async (
 
     while (
       mergedFilms.length < requestBody.pageSize &&
-      activeServiceKeys.length > 0
+      Object.keys(serviceStates).length > 0
     ) {
-      const fetchPromises = activeServiceKeys.map(async (key) => {
-        const url = services[key];
-        const state = serviceStates[key];
-        if (state.buffer.length > 0 || state.cursor === null) {
+      const fetchPromises = Object.keys(serviceStates).map(async (key) => {
+        const serviceKey = key as ServiceKey;
+        const url = services[serviceKey];
+        const state = serviceStates[serviceKey];
+        if (state.buffer.length > 0 || state.noMoreData) {
           return;
         }
         try {
           const response = await axios.post(url, {
-            ...requestBody,
             sortField,
             sortDirection,
-            cursor: state.cursor,
+            currentPage: state.currentPage,
             pageSize: requestBody.pageSize,
+            search: requestBody.search,
           });
           const data = response.data;
           state.buffer = data.films as Film[];
-          state.cursor = data.nextCursor;
 
-          if (state.buffer.length === 0 && state.cursor === null) {
-            const index = activeServiceKeys.indexOf(key);
-            if (index > -1) {
-              activeServiceKeys.splice(index, 1);
-            }
-            delete serviceStates[key];
+          if (
+            state.buffer.length === 0 ||
+            state.buffer.length < requestBody.pageSize
+          ) {
+            state.noMoreData = true;
+          } else {
+            state.currentPage += 1;
           }
         } catch (error: any) {
           console.error(`Error fetching data from ${url}:`, error.message);
-          const index = activeServiceKeys.indexOf(key);
-          if (index > -1) {
-            activeServiceKeys.splice(index, 1);
-          }
-          delete serviceStates[key];
+          delete serviceStates[serviceKey];
         }
       });
 
@@ -124,8 +129,9 @@ export const searchFilms: APIGatewayProxyHandler = async (
       let nextFilm: Film | null = null;
       let nextServiceKey: ServiceKey | null = null;
 
-      for (const key of activeServiceKeys) {
-        const state = serviceStates[key];
+      for (const key in serviceStates) {
+        const serviceKey = key as ServiceKey;
+        const state = serviceStates[serviceKey];
         if (state.buffer.length === 0) {
           continue;
         }
@@ -135,7 +141,7 @@ export const searchFilms: APIGatewayProxyHandler = async (
           compare(film, nextFilm, sortField, sortDirection) < 0
         ) {
           nextFilm = film;
-          nextServiceKey = key;
+          nextServiceKey = serviceKey;
         }
       }
 
@@ -157,27 +163,21 @@ export const searchFilms: APIGatewayProxyHandler = async (
           nextFilm.numberOfCopiesAvailable;
       }
 
-      if (
-        serviceStates[nextServiceKey].buffer.length === 0 &&
-        serviceStates[nextServiceKey].cursor === null
-      ) {
-        const index = activeServiceKeys.indexOf(nextServiceKey);
-        if (index > -1) {
-          activeServiceKeys.splice(index, 1);
-        }
+      const state = serviceStates[nextServiceKey];
+      if (state.buffer.length === 0 && state.noMoreData) {
         delete serviceStates[nextServiceKey];
       }
     }
 
-    const remainingCursors = Object.fromEntries(
+    const remainingPages = Object.fromEntries(
       Object.entries(serviceStates)
-        .filter(([_, state]) => state.cursor !== null)
-        .map(([key, state]) => [key, state.cursor!])
+        .filter(([_, state]) => !state.noMoreData)
+        .map(([key, state]) => [key, state.currentPage])
     ) as Record<ServiceKey, number>;
 
     const nextPageKey =
-      Object.keys(remainingCursors).length > 0
-        ? encodeNextPageKey(remainingCursors)
+      Object.keys(remainingPages).length > 0
+        ? encodeNextPageKey(remainingPages)
         : null;
 
     return {
@@ -211,16 +211,16 @@ function compare(
   return sortDirection === "ASC" ? result : -result;
 }
 
-function encodeNextPageKey(cursors: Record<ServiceKey, number>): string | null {
-  if (Object.keys(cursors).length === 0) {
+function encodeNextPageKey(pages: Record<ServiceKey, number>): string | null {
+  if (Object.keys(pages).length === 0) {
     return null;
   }
-  return Buffer.from(JSON.stringify(cursors)).toString("base64");
+  return Buffer.from(JSON.stringify(pages)).toString("base64");
 }
 
 function decodeNextPageKey(nextPageKey: string): Record<ServiceKey, number> {
-  const cursors = JSON.parse(
+  const pages = JSON.parse(
     Buffer.from(nextPageKey, "base64").toString("utf-8")
   );
-  return cursors;
+  return pages;
 }
